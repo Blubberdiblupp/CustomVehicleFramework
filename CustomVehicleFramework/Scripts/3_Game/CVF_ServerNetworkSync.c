@@ -32,9 +32,11 @@ class CVF_NetworkSync
 		string serverId = GetCVFConfigManager().m_Config.ServerId;
 		int loadedHash = CVF_ConfigGenerator.GetLoadedPayloadHash();
 		bool ready = CVF_ConfigGenerator.IsLoadedConfigCurrent();
+		int nativeFingerprintHash = CVF_ConfigGenerator.GetLoadedNativeFingerprint();
+		int nativeFingerprintChars = CVF_ConfigGenerator.GetLoadedNativeFingerprintChars();
 
 		s_ClientStates.Set(identity.GetId(), new CVF_ServerClientSyncState(payloadHash));
-		Param6<string, int, int, int, int, bool> hello = new Param6<string, int, int, int, int, bool>(serverId, payloadHash, payloadChars, CVF_Constants.SYNC_PROTOCOL_VERSION, loadedHash, ready);
+		Param8<string, int, int, int, int, bool, int, int> hello = new Param8<string, int, int, int, int, bool, int, int>(serverId, payloadHash, payloadChars, CVF_Constants.SYNC_PROTOCOL_VERSION, loadedHash, ready, nativeFingerprintHash, nativeFingerprintChars);
 		g_Game.RPCSingleParam(null, CVF_Constants.RPC_SYNC_HELLO, hello, true, identity);
 
 		if (!ready)
@@ -45,7 +47,7 @@ class CVF_NetworkSync
 		}
 
 		g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(CheckSyncTimeout, CVF_Constants.SYNC_TIMEOUT_MS, false, identity, payloadHash);
-		CVF_Logger.Log("Sent experimental server-config handshake to " + identity.GetName() + " Hash=" + payloadHash.ToString());
+		CVF_Logger.Log("Sent client-native config handshake to " + identity.GetName() + " Hash=" + payloadHash.ToString() + " NativeFingerprint=" + nativeFingerprintHash.ToString());
 	}
 
 	static void HandleClientStatus(PlayerIdentity identity, int status, int payloadHash, int protocolVersion, string detail)
@@ -59,7 +61,6 @@ class CVF_NetworkSync
 			CVF_Logger.Warning("Ignored CVF status without a server hello from " + identity.GetName());
 			return;
 		}
-
 		if (protocolVersion != CVF_Constants.SYNC_PROTOCOL_VERSION || payloadHash != state.ExpectedHash || payloadHash != CVF_ConfigGenerator.GetCurrentPayloadHash())
 		{
 			state.Status = CVF_ClientSyncStatus.CVF_SYNC_ERROR;
@@ -67,8 +68,7 @@ class CVF_NetworkSync
 			g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(DisconnectClient, 1500, false, identity);
 			return;
 		}
-
-		if (state.Status != CVF_ClientSyncStatus.CVF_SYNC_NONE || (status != CVF_ClientSyncStatus.CVF_SYNC_READY && status != CVF_ClientSyncStatus.CVF_SYNC_ERROR))
+		if (!IsAllowedTransition(state.Status, status))
 		{
 			state.Status = CVF_ClientSyncStatus.CVF_SYNC_ERROR;
 			SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_SYNC_ERROR, "Invalid vehicle configuration handshake state.");
@@ -77,21 +77,80 @@ class CVF_NetworkSync
 		}
 
 		state.Status = status;
-		if (status == CVF_ClientSyncStatus.CVF_SYNC_READY)
+		switch (status)
 		{
-			CVF_Logger.Log("CVF client script acknowledged the server override for " + identity.GetName() + ". Client-native config is not verified in server-bootstrap mode.");
-			return;
-		}
+			case CVF_ClientSyncStatus.CVF_SYNC_READY:
+				CVF_Logger.Log("Client native vehicle config and runtime package verified: " + identity.GetName() + " Hash=" + payloadHash.ToString());
+				break;
 
-		CVF_Logger.Warning("Client vehicle handshake failed for " + identity.GetName() + ": " + detail);
-		SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_SYNC_ERROR, "Vehicle configuration handshake failed. Check the client script log.");
-		g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(DisconnectClient, 2000, false, identity);
+			case CVF_ClientSyncStatus.CVF_SYNC_REQUEST_PACKAGE:
+				SendPackage(identity);
+				break;
+
+			case CVF_ClientSyncStatus.CVF_SYNC_RESTART_FROM_CACHE:
+				SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_RESTART_REQUIRED, "Cached vehicle settings were activated. Close DayZ completely, start it again, and reconnect.");
+				g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(DisconnectClient, 2500, false, identity);
+				break;
+
+			case CVF_ClientSyncStatus.CVF_SYNC_RESTART_AFTER_DOWNLOAD:
+				SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_RESTART_REQUIRED, "Vehicle settings were downloaded and activated. Close DayZ completely, start it again, and reconnect.");
+				g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(DisconnectClient, 2500, false, identity);
+				break;
+
+			default:
+				CVF_Logger.Warning("Client vehicle synchronization failed for " + identity.GetName() + ": " + detail);
+				SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_SYNC_ERROR, "Vehicle configuration could not be prepared. Check the client script log.");
+				g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(DisconnectClient, 2000, false, identity);
+				break;
+		}
 	}
 
 	static void RemoveClient(PlayerIdentity identity)
 	{
 		if (identity)
 			s_ClientStates.Remove(identity.GetId());
+	}
+
+	private static bool IsAllowedTransition(int previousStatus, int nextStatus)
+	{
+		if (previousStatus == CVF_ClientSyncStatus.CVF_SYNC_NONE)
+			return nextStatus == CVF_ClientSyncStatus.CVF_SYNC_READY || nextStatus == CVF_ClientSyncStatus.CVF_SYNC_REQUEST_PACKAGE || nextStatus == CVF_ClientSyncStatus.CVF_SYNC_RESTART_FROM_CACHE || nextStatus == CVF_ClientSyncStatus.CVF_SYNC_ERROR;
+		if (previousStatus == CVF_ClientSyncStatus.CVF_SYNC_REQUEST_PACKAGE)
+			return nextStatus == CVF_ClientSyncStatus.CVF_SYNC_RESTART_AFTER_DOWNLOAD || nextStatus == CVF_ClientSyncStatus.CVF_SYNC_ERROR;
+		return false;
+	}
+
+	private static void SendPackage(PlayerIdentity identity)
+	{
+		string packageJson = CVF_ConfigGenerator.GetCurrentPackageJson();
+		if (packageJson == "" || packageJson.Length() > CVF_Constants.MAX_GENERATED_PACKAGE_CHARS)
+		{
+			SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_SYNC_ERROR, "The server vehicle package is empty or too large.");
+			g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(DisconnectClient, 1500, false, identity);
+			return;
+		}
+
+		int chunkSize = CVF_Constants.RPC_CONFIG_CHUNK_SIZE;
+		int totalChunks = (packageJson.Length() + chunkSize - 1) / chunkSize;
+		if (totalChunks <= 0 || totalChunks > CVF_Constants.RPC_MAX_CHUNKS)
+		{
+			SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_SYNC_ERROR, "The server vehicle package has an invalid chunk count.");
+			g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(DisconnectClient, 1500, false, identity);
+			return;
+		}
+
+		int batchId = Math.RandomInt(1, 2147483646);
+		for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++)
+		{
+			int start = chunkIndex * chunkSize;
+			int length = chunkSize;
+			if (packageJson.Length() - start < length)
+				length = packageJson.Length() - start;
+			string chunk = packageJson.Substring(start, length);
+			Param4<int, int, int, string> payload = new Param4<int, int, int, string>(batchId, chunkIndex, totalChunks, chunk);
+			g_Game.RPCSingleParam(null, CVF_Constants.RPC_PACKAGE_CHUNK, payload, true, identity);
+		}
+		CVF_Logger.Log("Sent structured vehicle package to " + identity.GetName() + " Chunks=" + totalChunks.ToString());
 	}
 
 	private static void SendNotice(PlayerIdentity identity, int noticeType, string message)
@@ -111,7 +170,7 @@ class CVF_NetworkSync
 		if (state.ExpectedHash != expectedHash || state.Status == CVF_ClientSyncStatus.CVF_SYNC_READY)
 			return;
 
-		SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_SYNC_ERROR, "Vehicle configuration handshake timed out.");
+		SendNotice(identity, CVF_SyncNoticeType.CVF_NOTICE_SYNC_ERROR, "Vehicle configuration verification timed out.");
 		DisconnectClient(identity);
 	}
 

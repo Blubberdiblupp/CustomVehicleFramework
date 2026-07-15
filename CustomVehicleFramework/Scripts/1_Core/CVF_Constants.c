@@ -1,7 +1,7 @@
 class CVF_Constants
 {
 	static const int CONFIG_VERSION = 3;
-	static const int SYNC_PROTOCOL_VERSION = 5;
+	static const int SYNC_PROTOCOL_VERSION = 6;
 	static const string CONFIG_DIR = "$profile:CustomVehicleFramework";
 	static const string CONFIG_FILE = "$profile:CustomVehicleFramework\\vehicles.json";
 
@@ -12,14 +12,31 @@ class CVF_Constants
 	static const string GENERATED_INFO_FILE = "$profile:CustomVehicleFramework_Generated\\README.txt";
 	static const string GENERATED_PBO_PREFIX = "profiles\\CustomVehicleFramework_Generated";
 
+	static const string CLIENT_DIR = "$profile:CustomVehicleFramework\\Client";
+	static const string CLIENT_SERVERS_DIR = "$profile:CustomVehicleFramework\\Client\\Servers";
+	static const string CLIENT_ENDPOINT_INDEX_FILE = "$profile:CustomVehicleFramework\\Client\\endpoint_index.json";
+	static const string CLIENT_ACTIVE_METADATA_FILE = "$profile:CustomVehicleFramework\\Client\\active.json";
+	static const string CLIENT_ACTIVE_MOD_DIR = "$profile:CustomVehicleFramework_ClientActive";
+	static const string CLIENT_ACTIVE_CONFIG_FILE = "$profile:CustomVehicleFramework_ClientActive\\config.cpp";
+	static const string CLIENT_ACTIVE_PREFIX_FILE = "$profile:CustomVehicleFramework_ClientActive\\$PBOPREFIX$";
+	static const string CLIENT_ACTIVE_INFO_FILE = "$profile:CustomVehicleFramework_ClientActive\\README.txt";
+	static const string CLIENT_GENERATED_PBO_PREFIX = "profiles\\CustomVehicleFramework_ClientActive";
+	static const string CACHE_PACKAGE_FILE = "package.json";
+	static const string CACHE_CONFIG_FILE = "config.cpp";
+	static const string CACHE_METADATA_FILE = "metadata.json";
+
 	static const int RPC_SYNC_HELLO = 4406601;
+	static const int RPC_PACKAGE_CHUNK = 4406602;
 	static const int RPC_CLIENT_STATUS = 4406603;
 	static const int RPC_SYNC_NOTICE = 4406604;
+	static const int RPC_CONFIG_CHUNK_SIZE = 6000;
+	static const int RPC_MAX_CHUNKS = 2048;
 	static const int SYNC_TIMEOUT_MS = 120000;
 	static const int CONFIG_WATCH_INTERVAL_MS = 15000;
 	static const int MAX_GENERATED_PACKAGE_CHARS = 12000000;
 
 	static const string CONFIG_PROBE_PATH = "CfgCustomVehicleFramework GeneratedOverrideProbe";
+	static const string CLIENT_CONFIG_PROBE_PATH = "CfgCustomVehicleFramework ClientGeneratedOverrideProbe";
 	static const float FALLBACK_FLOAT = -1.0;
 
 	static bool IsFallback(float value)
@@ -46,13 +63,27 @@ enum CVF_ClientSyncStatus
 {
 	CVF_SYNC_NONE = 0,
 	CVF_SYNC_READY = 1,
-	CVF_SYNC_ERROR = 2
+	CVF_SYNC_REQUEST_PACKAGE = 2,
+	CVF_SYNC_RESTART_FROM_CACHE = 3,
+	CVF_SYNC_RESTART_AFTER_DOWNLOAD = 4,
+	CVF_SYNC_ERROR = 5
 }
 
 enum CVF_SyncNoticeType
 {
-	CVF_NOTICE_SERVER_RESTART_REQUIRED = 1,
-	CVF_NOTICE_SYNC_ERROR = 2
+	CVF_NOTICE_RESTART_REQUIRED = 1,
+	CVF_NOTICE_SERVER_RESTART_REQUIRED = 2,
+	CVF_NOTICE_SYNC_ERROR = 3,
+	CVF_NOTICE_BOOTSTRAP_FAILED = 4
+}
+
+enum CVF_CachePreparationResult
+{
+	CVF_CACHE_MISSING = 0,
+	CVF_CACHE_ALREADY_LOADED = 1,
+	CVF_CACHE_RESTART_REQUIRED = 2,
+	CVF_CACHE_BOOTSTRAP_FAILED = 3,
+	CVF_CACHE_ERROR = 4
 }
 
 class CVF_SharedUtils
@@ -112,6 +143,15 @@ class CVF_SharedUtils
 		}
 
 		return true;
+	}
+
+	static string NormalizeEndpoint(string address, int port)
+	{
+		string normalized = address;
+		normalized.ToLower();
+		if (port <= 0)
+			port = 2302;
+		return normalized + ":" + port.ToString();
 	}
 
 	static bool IsFiniteInRange(float value, float minimum, float maximum)
@@ -454,6 +494,34 @@ class CVF_GeneratedVehicleConfig : Managed
 	}
 }
 
+class CVF_GeneratedRuntimeConfig : Managed
+{
+	string ClassName;
+	float MaxSpeedKmh;
+	float ThrottleMultiplier;
+	float ExtraDriveForce;
+	float SteeringMultiplier;
+	float SteeringYawAssist;
+	float BrakeMultiplier;
+	float ExtraBrakeForce;
+	float DragResistance;
+	float StabilityAssist;
+
+	void CVF_GeneratedRuntimeConfig()
+	{
+		ClassName = "";
+		MaxSpeedKmh = 0.0;
+		ThrottleMultiplier = 1.0;
+		ExtraDriveForce = 0.0;
+		SteeringMultiplier = 1.0;
+		SteeringYawAssist = 0.0;
+		BrakeMultiplier = 1.0;
+		ExtraBrakeForce = 0.0;
+		DragResistance = 0.0;
+		StabilityAssist = 0.0;
+	}
+}
+
 class CVF_GeneratedPackage : Managed
 {
 	int ProtocolVersion;
@@ -461,6 +529,7 @@ class CVF_GeneratedPackage : Managed
 	string ServerId;
 	ref array<string> RequiredAddons;
 	ref array<ref CVF_GeneratedVehicleConfig> Vehicles;
+	ref array<ref CVF_GeneratedRuntimeConfig> RuntimeVehicles;
 
 	void CVF_GeneratedPackage()
 	{
@@ -469,5 +538,44 @@ class CVF_GeneratedPackage : Managed
 		ServerId = "";
 		RequiredAddons = new array<string>;
 		Vehicles = new array<ref CVF_GeneratedVehicleConfig>;
+		RuntimeVehicles = new array<ref CVF_GeneratedRuntimeConfig>;
+	}
+}
+
+class CVF_CacheMetadata : Managed
+{
+	int ProtocolVersion;
+	string ServerId;
+	int PayloadHash;
+	int PayloadChars;
+	string EndpointKey;
+	string ActivationSessionId;
+
+	void CVF_CacheMetadata()
+	{
+		ProtocolVersion = CVF_Constants.SYNC_PROTOCOL_VERSION;
+		ServerId = "";
+		PayloadHash = 0;
+		PayloadChars = 0;
+		EndpointKey = "";
+		ActivationSessionId = "";
+	}
+}
+
+class CVF_ClientEndpointEntry : Managed
+{
+	string EndpointKey;
+	string ServerId;
+	int PayloadHash;
+	int PayloadChars;
+}
+
+class CVF_ClientEndpointIndex : Managed
+{
+	ref array<ref CVF_ClientEndpointEntry> Entries;
+
+	void CVF_ClientEndpointIndex()
+	{
+		Entries = new array<ref CVF_ClientEndpointEntry>;
 	}
 }

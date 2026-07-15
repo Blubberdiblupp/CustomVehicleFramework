@@ -353,7 +353,7 @@ class CVF_ConfigManager
 		for (int i = 0; i < m_Config.VehicleOverrides.Count(); i++)
 		{
 			CVF_VehicleOverride overrideData = m_Config.VehicleOverrides.Get(i);
-			if (!overrideData || overrideData.ClassName == "")
+			if (!overrideData || overrideData.ClassName == "" || !overrideData.HasAnyOverrides())
 				continue;
 
 			CVF_ResolvedVehicleConfig resolved = ResolveConfig(overrideData);
@@ -439,6 +439,22 @@ class CVF_ConfigManager
 		string classKey = NormalizeClassKey(className);
 		if (m_ResolvedMap.Find(classKey, resolved))
 			return true;
+
+		string currentClass = className;
+		for (int parentIndex = 0; parentIndex < 50; parentIndex++)
+		{
+			string parentClass;
+			if (!g_Game || !g_Game.ConfigGetBaseName("CfgVehicles " + currentClass, parentClass) || parentClass == "" || parentClass == currentClass)
+				break;
+
+			string parentKey = NormalizeClassKey(parentClass);
+			if (m_ResolvedMap.Find(parentKey, resolved))
+			{
+				m_ResolvedMap.Set(classKey, resolved);
+				return true;
+			}
+			currentClass = parentClass;
+		}
 
 		if (!m_Config.GlobalSettings || !m_Config.GlobalSettings.HasAnyOverrides() || !CVF_ConfigRenderer.IsSupportedVehicleClass(className))
 		{

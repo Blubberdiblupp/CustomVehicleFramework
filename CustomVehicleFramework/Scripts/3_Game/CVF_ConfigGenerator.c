@@ -1,11 +1,14 @@
 class CVF_ConfigGenerator
 {
 	private static ref CVF_GeneratedPackage s_CurrentPackage;
+	private static string s_CurrentPackageJson = "";
 	private static int s_CurrentPayloadHash = 0;
 	private static int s_CurrentPayloadChars = 0;
 	private static bool s_HasGeneratedPackage = false;
 	private static bool s_LoadedPackageVerified = false;
 	private static string s_LoadedVerificationError = "";
+	private static int s_LoadedNativeFingerprint = 0;
+	private static int s_LoadedNativeFingerprintChars = 0;
 
 	static bool GenerateNextBootConfig(CVF_ConfigManager configMgr)
 	{
@@ -28,15 +31,21 @@ class CVF_ConfigGenerator
 			return false;
 		}
 		string validationError;
-		if (!CVF_ConfigRenderer.ValidatePackage(package, true, validationError))
+		if (!CVF_ConfigRenderer.ValidatePackage(package, true, true, validationError))
 		{
 			CVF_Logger.Error("Generated package validation failed: " + validationError);
+			return false;
+		}
+		CVF_GeneratedPackage syncPackage = BuildSyncPackage(package);
+		if (!CVF_ConfigRenderer.ValidatePackage(syncPackage, true, true, validationError))
+		{
+			CVF_Logger.Error("Generated client sync package validation failed: " + validationError);
 			return false;
 		}
 
 		string packageJson;
 		string jsonError;
-		if (!JsonFileLoader<CVF_GeneratedPackage>.MakeData(package, packageJson, jsonError, false))
+		if (!JsonFileLoader<CVF_GeneratedPackage>.MakeData(syncPackage, packageJson, jsonError, false))
 		{
 			CVF_Logger.Error("Could not serialize generated package: " + jsonError);
 			return false;
@@ -51,7 +60,7 @@ class CVF_ConfigGenerator
 		}
 
 		string renderError;
-		if (!CVF_ConfigRenderer.WritePackage(package, CVF_Constants.STAGING_CONFIG_FILE, payloadHash, payloadChars, renderError))
+		if (!CVF_ConfigRenderer.WritePackage(package, CVF_Constants.STAGING_CONFIG_FILE, payloadHash, payloadChars, false, renderError))
 		{
 			CVF_Logger.Error(renderError);
 			return false;
@@ -73,13 +82,14 @@ class CVF_ConfigGenerator
 			CVF_Logger.Error("Could not write the generated addon information file.");
 			return false;
 		}
-		s_CurrentPackage = package;
+		s_CurrentPackage = syncPackage;
+		s_CurrentPackageJson = packageJson;
 		s_CurrentPayloadHash = payloadHash;
 		s_CurrentPayloadChars = payloadChars;
 		s_HasGeneratedPackage = true;
 		RefreshLoadedVerification();
 
-		CVF_Logger.Log("Generated native override config for the server bootstrap. Vehicles=" + package.Vehicles.Count().ToString() + " Hash=" + payloadHash.ToString() + " Path=" + CVF_Constants.GENERATED_CONFIG_FILE);
+		CVF_Logger.Log("Generated CVF package for the server bootstrap. NativeVehicles=" + syncPackage.Vehicles.Count().ToString() + " RuntimeVehicles=" + syncPackage.RuntimeVehicles.Count().ToString() + " Hash=" + payloadHash.ToString() + " Path=" + CVF_Constants.GENERATED_CONFIG_FILE);
 		LogLoadedConfigState(activeFileExisted);
 		return true;
 	}
@@ -94,9 +104,24 @@ class CVF_ConfigGenerator
 		return s_CurrentPayloadChars;
 	}
 
+	static string GetCurrentPackageJson()
+	{
+		return s_CurrentPackageJson;
+	}
+
 	static bool HasGeneratedPackage()
 	{
 		return s_HasGeneratedPackage;
+	}
+
+	static int GetLoadedNativeFingerprint()
+	{
+		return s_LoadedNativeFingerprint;
+	}
+
+	static int GetLoadedNativeFingerprintChars()
+	{
+		return s_LoadedNativeFingerprintChars;
 	}
 
 	static int GetLoadedProtocol()
@@ -144,17 +169,24 @@ class CVF_ConfigGenerator
 	{
 		s_LoadedPackageVerified = false;
 		s_LoadedVerificationError = "";
+		s_LoadedNativeFingerprint = 0;
+		s_LoadedNativeFingerprintChars = 0;
 		if (!IsLoadedProbeCurrent())
 			return;
 
 		s_LoadedPackageVerified = CVF_ConfigRenderer.VerifyLoadedPackage(s_CurrentPackage, s_LoadedVerificationError);
+		if (!s_LoadedPackageVerified)
+			return;
+
+		if (!CVF_ConfigRenderer.BuildLoadedNativeFingerprint(s_CurrentPackage, s_LoadedNativeFingerprint, s_LoadedNativeFingerprintChars, s_LoadedVerificationError))
+			s_LoadedPackageVerified = false;
 	}
 
 	private static void LogLoadedConfigState(bool activeFileExisted)
 	{
 		if (IsLoadedConfigCurrent())
 		{
-			CVF_Logger.Log("The generated override config is active through the server bootstrap and all native vehicle values match the server JSON.");
+			CVF_Logger.Log("The generated override config is active through the server bootstrap and all native vehicle values match the server JSON. NativeFingerprint=" + s_LoadedNativeFingerprint.ToString());
 			return;
 		}
 		if (IsLoadedProbeCurrent() && !s_LoadedPackageVerified)
@@ -183,7 +215,7 @@ class CVF_ConfigGenerator
 			return package;
 
 		ref map<string, bool> processedClasses = new map<string, bool>;
-		if (configMgr.m_Config.GlobalSettings && configMgr.m_Config.GlobalSettings.HasNativeOverrides())
+		if (configMgr.m_Config.GlobalSettings && configMgr.m_Config.GlobalSettings.HasAnyOverrides())
 		{
 			int totalClasses = g_Game.ConfigGetChildrenCount("CfgVehicles");
 			for (int classIndex = 0; classIndex < totalClasses; classIndex++)
@@ -196,7 +228,7 @@ class CVF_ConfigGenerator
 				string globalClassKey = globalClassName;
 				globalClassKey.ToLower();
 				processedClasses.Set(globalClassKey, true);
-				if (!AppendNativeVehicle(package, configMgr, globalClassName))
+				if (!AppendVehicle(package, configMgr, globalClassName))
 					return null;
 			}
 		}
@@ -204,7 +236,7 @@ class CVF_ConfigGenerator
 		for (int i = 0; i < configMgr.m_Config.VehicleOverrides.Count(); i++)
 		{
 			CVF_VehicleOverride overrideData = configMgr.m_Config.VehicleOverrides.Get(i);
-			if (!overrideData || overrideData.ClassName == "")
+			if (!overrideData || overrideData.ClassName == "" || !overrideData.HasAnyOverrides())
 				continue;
 
 			string classKey = overrideData.ClassName;
@@ -220,25 +252,59 @@ class CVF_ConfigGenerator
 				continue;
 			}
 
-			if (!AppendNativeVehicle(package, configMgr, overrideData.ClassName))
+			if (!AppendVehicle(package, configMgr, overrideData.ClassName))
 				return null;
 		}
 
 		return package;
 	}
 
-	private static bool AppendNativeVehicle(CVF_GeneratedPackage package, CVF_ConfigManager configMgr, string className)
+	private static CVF_GeneratedPackage BuildSyncPackage(CVF_GeneratedPackage source)
+	{
+		CVF_GeneratedPackage package = new CVF_GeneratedPackage();
+		package.ServerId = source.ServerId;
+		package.RequiredAddons.Insert("CustomVehicleFramework");
+		for (int nativeIndex = 0; nativeIndex < source.Vehicles.Count(); nativeIndex++)
+			package.Vehicles.Insert(source.Vehicles.Get(nativeIndex));
+		for (int runtimeIndex = 0; runtimeIndex < source.RuntimeVehicles.Count(); runtimeIndex++)
+			package.RuntimeVehicles.Insert(source.RuntimeVehicles.Get(runtimeIndex));
+		return package;
+	}
+
+	private static bool AppendVehicle(CVF_GeneratedPackage package, CVF_ConfigManager configMgr, string className)
 	{
 		CVF_ResolvedVehicleConfig resolved;
-		if (!configMgr.GetResolvedConfigFor(className, resolved) || !HasNativeConfigOverrides(resolved))
+		if (!configMgr.GetResolvedConfigFor(className, resolved))
 			return true;
 
-		CVF_GeneratedVehicleConfig generatedVehicle = BuildGeneratedVehicle(className, resolved);
-		if (!generatedVehicle)
-			return false;
-		if (HasConfigOverrides(generatedVehicle))
-			package.Vehicles.Insert(generatedVehicle);
+		if (HasNativeConfigOverrides(resolved))
+		{
+			CVF_GeneratedVehicleConfig generatedVehicle = BuildGeneratedVehicle(className, resolved);
+			if (!generatedVehicle)
+				return false;
+			if (HasConfigOverrides(generatedVehicle))
+				package.Vehicles.Insert(generatedVehicle);
+		}
+
+		if (resolved.HasRuntimeOverrides())
+			package.RuntimeVehicles.Insert(BuildGeneratedRuntimeVehicle(className, resolved));
 		return true;
+	}
+
+	private static CVF_GeneratedRuntimeConfig BuildGeneratedRuntimeVehicle(string className, CVF_ResolvedVehicleConfig resolved)
+	{
+		CVF_GeneratedRuntimeConfig data = new CVF_GeneratedRuntimeConfig();
+		data.ClassName = className;
+		data.MaxSpeedKmh = resolved.MaxSpeedKmh;
+		data.ThrottleMultiplier = resolved.ThrottleMultiplier;
+		data.ExtraDriveForce = resolved.ExtraDriveForce;
+		data.SteeringMultiplier = resolved.SteeringMultiplier;
+		data.SteeringYawAssist = resolved.SteeringYawAssist;
+		data.BrakeMultiplier = resolved.BrakeMultiplier;
+		data.ExtraBrakeForce = resolved.ExtraBrakeForce;
+		data.DragResistance = resolved.DragResistance;
+		data.StabilityAssist = resolved.StabilityAssist;
+		return data;
 	}
 
 	private static bool HasNativeConfigOverrides(CVF_ResolvedVehicleConfig data)
@@ -301,7 +367,7 @@ class CVF_ConfigGenerator
 			g_Game.ConfigGetChildName("CfgPatches", i, addonName);
 			if (!CVF_ConfigRenderer.IsLoadedAddonClass(addonName))
 				continue;
-			if (addonName == "CustomVehicleFramework_GeneratedOverrides" || addonName == "CustomVehicleFramework_Overrides" || addonName == "CustomVehicleFramework_Overrides_Deprecated")
+			if (addonName == "CustomVehicleFramework_GeneratedOverrides" || addonName == "CustomVehicleFramework_ClientGeneratedOverrides" || addonName == "CustomVehicleFramework_Overrides" || addonName == "CustomVehicleFramework_Overrides_Deprecated")
 				continue;
 			if (!CVF_SharedUtils.IsSafeAddonName(addonName))
 			{

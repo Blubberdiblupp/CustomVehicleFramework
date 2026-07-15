@@ -4,6 +4,15 @@ class CVF_ClientUI
 	private static string s_PendingMessage = "";
 	private static int s_DialogAttempts = 0;
 
+	static void ShowRestartRequired(string message)
+	{
+		CVF_Logger.Warning(message);
+		if (NotificationSystem.GetInstance())
+			NotificationSystem.AddNotificationExtended(30.0, "Custom Vehicle Framework", message);
+		else
+			QueueMainMenuDialog("Custom Vehicle Framework", message);
+	}
+
 	static void ShowError(string message)
 	{
 		CVF_Logger.Error(message);

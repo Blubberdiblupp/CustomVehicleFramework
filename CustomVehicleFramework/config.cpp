@@ -18,6 +18,13 @@ class CfgCustomVehicleFramework
         cvfPayloadChars = 0;
         cvfServerId = "";
     };
+    class ClientGeneratedOverrideProbe
+    {
+        cvfProtocol = 0;
+        cvfPayloadHash = 0;
+        cvfPayloadChars = 0;
+        cvfServerId = "";
+    };
 };
 
 class CfgMods
@@ -33,7 +40,7 @@ class CfgMods
         credits = "Blubber";
         author = "Blubber";
         authorID = "76561197995145122";
-        version = "1.5";
+        version = "1.6";
         extra = 0;
         type = "mod";
 

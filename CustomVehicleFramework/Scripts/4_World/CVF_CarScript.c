@@ -21,8 +21,14 @@ modded class CarScript
 		if (!m_CVF_IsManaged)
 			return;
 
-		if (!g_Game || !g_Game.IsServer())
+		if (!g_Game)
 			return;
+		if (!g_Game.IsServer())
+		{
+			ManBase driver = ManBase.Cast(CrewDriver());
+			if (!driver || !driver.IsControlledPlayer())
+				return;
+		}
 
 		CVF_ApplyRuntimeTuning(dt);
 	}
@@ -32,19 +38,33 @@ modded class CarScript
 		if (m_CVF_RuntimeChecked)
 			return;
 
-		m_CVF_RuntimeChecked = true;
-
-		if (!g_Game || !g_Game.IsServer())
+		if (!g_Game)
 			return;
 
 		m_CVF_VehicleType = GetType();
 
 		CVF_ResolvedVehicleConfig resolved;
-		if (GetCVFConfigManager().GetResolvedConfigFor(m_CVF_VehicleType, resolved) && resolved.HasRuntimeOverrides())
+		if (g_Game.IsServer())
+		{
+			m_CVF_RuntimeChecked = true;
+			if (GetCVFConfigManager().GetResolvedConfigFor(m_CVF_VehicleType, resolved) && resolved.HasRuntimeOverrides())
+			{
+				m_CVF_Config = resolved;
+				m_CVF_IsManaged = true;
+				CVF_Logger.Log("Managing vehicle on server: " + m_CVF_VehicleType);
+			}
+			return;
+		}
+
+		if (!CVF_RuntimeConfigStore.HasVerifiedPackage())
+			return;
+
+		m_CVF_RuntimeChecked = true;
+		if (CVF_RuntimeConfigStore.GetResolvedConfigFor(m_CVF_VehicleType, resolved) && resolved.HasRuntimeOverrides())
 		{
 			m_CVF_Config = resolved;
 			m_CVF_IsManaged = true;
-			CVF_Logger.Log("Managing vehicle: " + m_CVF_VehicleType);
+			CVF_Logger.Log("Managing local vehicle prediction: " + m_CVF_VehicleType);
 		}
 	}
 

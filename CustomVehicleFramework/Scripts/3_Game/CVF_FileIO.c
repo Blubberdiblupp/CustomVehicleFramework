@@ -16,6 +16,15 @@ class CVF_FileIO
 		return true;
 	}
 
+	static bool EnsureClientDirectories()
+	{
+		if (!EnsureDirectory(CVF_Constants.CONFIG_DIR)) return false;
+		if (!EnsureDirectory(CVF_Constants.CLIENT_DIR)) return false;
+		if (!EnsureDirectory(CVF_Constants.CLIENT_SERVERS_DIR)) return false;
+		if (!EnsureDirectory(CVF_Constants.CLIENT_ACTIVE_MOD_DIR)) return false;
+		return true;
+	}
+
 	static bool ReadAllText(string path, out string content)
 	{
 		content = "";
